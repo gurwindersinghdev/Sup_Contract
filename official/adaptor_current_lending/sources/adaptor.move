@@ -29,6 +29,7 @@
 module adaptor_current_lending::adaptor {
     use sui::clock::Clock;
     use sui::coin::Coin;
+    use sui::event;
     use sui::vec_map::{Self, VecMap};
     use SupWallet::intent;
     use SupWallet::wallet::{Self, Wallet};
@@ -58,6 +59,16 @@ module adaptor_current_lending::adaptor {
         obligation_cap: ObligationOwnerCap,
         /// delegate address -> permission bitmask.
         delegates: VecMap<address, u32>,
+    }
+
+    /// Emitted on `adopt` so off-chain clients can DISCOVER the shared, vault-
+    /// parented obligation wrapper (it carries no owner, so owned-object queries
+    /// can't find it). `wallet_id` is the Wallet object id the app already holds;
+    /// `obligation_id` is the shared CurrentObligation to pass to supply/withdraw.
+    public struct CurrentObligationAdopted has copy, drop {
+        wallet_id: ID,
+        obligation_id: ID,
+        market: std::ascii::String,
     }
 
     const PERM_SUPPLY: u32 = 1;
@@ -95,6 +106,11 @@ module adaptor_current_lending::adaptor {
             delegates: vec_map::empty(),
         };
         let id = object::id(&self);
+        event::emit(CurrentObligationAdopted {
+            wallet_id: object::id(sup_wallet),
+            obligation_id: id,
+            market: std::type_name::with_defining_ids<MarketT>().into_string(),
+        });
         transfer::share_object(self);
         id
     }

@@ -38,6 +38,12 @@ public struct BucketSavingWithdrawn has copy, drop {
     usdb_out: u64,
 }
 
+public struct BucketRepaidWithdrawn has copy, drop {
+    account: address,
+    usdb_repaid: u64,
+    collateral_out: u64,
+}
+
 public struct BucketAccountCreated has copy, drop {
     wallet_id: ID,
     account: address,
@@ -369,6 +375,83 @@ public fun borrow_usdb_from_position<Collateral>(
         account: expected_account,
         collateral_in: 0,
         usdb_out: usdb_amount,
+    });
+}
+
+/// Repay USDB and withdraw collateral in one no-sign call. The USDB to repay is
+/// pulled from the vault (bounded by the adaptor allowance); the withdrawn
+/// collateral — and any USDB refund from an over-repay — are credited straight
+/// BACK TO THE VAULT, never to the caller/agent. The owner then withdraws the
+/// collateral from the vault with their own key.
+public fun repay_and_withdraw<Collateral>(
+    wallet: &mut Wallet,
+    bucket_account: &Account,
+    expected_account: address,
+    vault: &mut Vault<Collateral>,
+    treasury: &mut Treasury,
+    price: &Option<PriceResult<Collateral>>,
+    repay_amount: u64,
+    withdraw_amount: u64,
+    min_collateral_out: u64,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    assert!(repay_amount > 0, EZeroAmount);
+    assert_account(bucket_account, expected_account);
+    wallet::assert_external_account_bound_or_owner<BucketAdaptor>(
+        wallet,
+        expected_account,
+        ctx,
+    );
+
+    // Pull the USDB to repay from the vault (allowance-bounded payment intent).
+    let sig = intent::request_payment<BucketAdaptor, USDB>(
+        BucketAdaptor {},
+        repay_amount,
+        expected_account,
+    );
+    let (repay_coin, wallet_witness) =
+        intent::validate_and_pay<BucketAdaptor, USDB>(wallet, sig, ctx);
+
+    let account_request = account::request_with_account(bucket_account);
+    let collateral_in = coin::zero<Collateral>(ctx);
+    let request = vault::debtor_request<Collateral>(
+        vault,
+        &account_request,
+        treasury,
+        collateral_in,
+        0,
+        repay_coin,
+        withdraw_amount,
+    );
+    let (collateral_out, usdb_out, response) = vault::update_position<Collateral>(
+        vault,
+        treasury,
+        clock,
+        price,
+        request,
+        ctx,
+    );
+    vault::destroy_response<Collateral>(vault, treasury, response);
+
+    let receipt = intent::create_receipt_sig<BucketAdaptor, USDB>(
+        BucketAdaptor {},
+        repay_amount,
+        expected_account,
+    );
+    intent::verify_and_clear<BucketAdaptor, USDB>(wallet_witness, receipt);
+
+    let collateral_amount = coin::value(&collateral_out);
+    assert!(collateral_amount >= min_collateral_out, EInsufficientOutput);
+
+    // Custody: withdrawn collateral + any over-repay USDB refund go back to the vault.
+    credit_or_destroy_coin<BucketAdaptor, Collateral>(wallet, collateral_out, BucketAdaptor {});
+    credit_or_destroy_coin<BucketAdaptor, USDB>(wallet, usdb_out, BucketAdaptor {});
+
+    event::emit(BucketRepaidWithdrawn {
+        account: expected_account,
+        usdb_repaid: repay_amount,
+        collateral_out: collateral_amount,
     });
 }
 

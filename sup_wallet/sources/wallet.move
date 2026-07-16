@@ -403,6 +403,39 @@ module SupWallet::wallet {
         });
     }
 
+    /// Permissionlessly migrate a Coin that was sent to the wallet's IDENTITY
+    /// (account) address via a plain `transfer`/`public_transfer` into the
+    /// Wallet's SIP-58 address balance.
+    ///
+    /// Unlike `sweep_legacy_coin` (which receives a Coin owned by the Wallet
+    /// OBJECT), this receives a Coin owned by `identity(wallet)` — the vault's
+    /// keyless custody address, where funds delivered as a plain coin OBJECT to
+    /// the custody address land (e.g. a legacy broker fill that used
+    /// `public_transfer` instead of `send_funds`). Without this such a coin is
+    /// unspendable by the intent flow (which withdraws from the address balance)
+    /// AND unreachable by `sweep_legacy_coin` (wrong parent). The received Coin
+    /// is always credited to `identity(wallet)`, never to the caller.
+    public fun sweep_identity_coin<CoinType>(
+        wallet: &mut Wallet,
+        receiving: Receiving<Coin<CoinType>>,
+    ) {
+        let coin = account::receive(&mut wallet.signer, receiving);
+        let amount = coin::value(&coin);
+        let coin_key = type_name::with_defining_ids<CoinType>();
+        account::send_funds(&wallet.signer, coin);
+        event::emit(CoinDeposited {
+            wallet_id: object::id(wallet),
+            service: option::none(),
+            coin: coin_key,
+            amount,
+        });
+        event::emit(LegacyCoinSwept {
+            wallet_id: object::id(wallet),
+            coin: coin_key,
+            amount,
+        });
+    }
+
     /// Private service-credit deposit helper. The only place that emits
     /// `CoinDeposited`.
     /// Backed by `account::send_funds` which forwards to
